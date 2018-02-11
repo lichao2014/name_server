@@ -5,6 +5,8 @@
 #include "comm.h"
 #include "net.h"
 
+const char* localipaddr = "0.0.0.0";
+
 int
 main(int argc, char *argv[]) {
     if (argc < 4) {
@@ -12,7 +14,7 @@ main(int argc, char *argv[]) {
         return -1;
     }
 
-    int c = create_tcp_socket(argv[1], atoi(argv[2]), 0);
+    int c = create_tcp_socket(localipaddr, atoi(argv[2]), 0);
     if (c < 0) {
         return -1;
     }
