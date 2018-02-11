@@ -47,8 +47,9 @@ struct name_server_t {
     struct io_context io_ctx;
     int listenfd;
     struct list_t workers;
-    size_t nworkers : (sizeof(size_t) * 8 - 1);
+    size_t nworkers : (sizeof(size_t) * 8 - 2);
     int stopped : 1;
+    int io_ctx_init : 1;
     int sigfd;
 };
 
@@ -245,8 +246,20 @@ worker_init(struct name_worker_t *worker,
 
 static void
 worker_close(struct name_worker_t *worker) {
+    for (struct list_t *i = worker->clients.next; i; ) {
+        struct name_client_t *c = list_of(i, struct name_client_t, q);
+        i = i->next;
+
+        slice_free(&c->buf);
+        close(c->fd);
+        free(c);
+    }
+
+    worker->nclients = 0;
+
     if (worker->fd >= 0) {
         close(worker->fd);
+        worker->fd = -1;
     }
 
     io_context_close(&worker->io_ctx);
@@ -303,17 +316,12 @@ server_init(struct name_server_t *server, const char *ip, int port) {
         return -1;
     }
 
-    if (io_context_init(&server->io_ctx, kEpollSize) < 0) {
-        ERROR_LOG("io_context_init failed");
-        close(listenfd);
-        return -1;
-    }
-
     server->listenfd = listenfd;
     list_init(&server->workers);
     server->nworkers = 0;
     server->stopped = 0;
     server->sigfd = -1;
+    server->io_ctx_init = 0;
 
     return 0;
 }
@@ -332,14 +340,15 @@ server_close(struct name_server_t *server) {
 
     if (server->sigfd > 0) {
         close(server->sigfd);
-        io_context_del(&server->io_ctx, server->sigfd);
     }
 
     if (server->listenfd > 0) {
         close(server->listenfd);
     }
 
-    io_context_close(&server->io_ctx);
+    if (server->io_ctx_init) {
+        io_context_close(&server->io_ctx);
+    }
 }
 
 static struct name_worker_ctx_t *
@@ -393,7 +402,6 @@ server_on_read(struct io_object *o) {
 static void
 server_on_error(struct io_object *o) {
     struct name_worker_ctx_t *wc = o->arg;
-
     ERROR_LOG("server'` worker %d on error:%d\n", wc->id, errno);
 }
 
@@ -426,21 +434,11 @@ server_add_worker(struct name_server_t *server, int id) {
     wc->server = server;
     wc->fd = fds[1];
     list_init(&wc->q);
-    if (io_context_add(&server->io_ctx,
-                        fds[1],
-                        &server_on_read,
-                        NULL,
-                        &server_on_error,
-                        wc) < 0) {
-        free(wc);
-        close(fds[1]);
-        return -1;
-    }
-
-    INFO_LOG("add worker #%d fd:%d\n", pid, fds[1]);
 
     list_insert_after(&server->workers, &wc->q);
     server->nworkers++;
+
+    INFO_LOG("add worker #%d fd:%d\n", pid, fds[1]);
 
     return 0;
 }
@@ -473,8 +471,27 @@ server_run(struct name_server_t *server, int nworkers) {
     for (int i = 0; i < nworkers; ++i) {
         ret = server_add_worker(server, i);
         if (0 != ret) {
-            ERROR_LOG("server add worker failed.i:%d\n", i);
             return ret;
+        }
+    }
+
+    if (io_context_init(&server->io_ctx, kEpollSize) < 0) {
+        ERROR_LOG("io_context_init failed");
+        return -1;
+    }
+
+    server->io_ctx_init = 1;
+
+    for (struct list_t *i = server->workers.next; i; i = i->next) {
+        struct name_worker_ctx_t *wc = list_of(i, struct name_worker_ctx_t, q);
+        if (io_context_add(&server->io_ctx,
+                            wc->fd,
+                            &server_on_read,
+                            NULL,
+                            &server_on_error,
+                            wc) < 0) {
+            ERROR_LOG("io_context_add failed");
+            return -1;
         }
     }
 
@@ -485,6 +502,7 @@ server_run(struct name_server_t *server, int nworkers) {
                                 SIGINT,
                                 -1);
     if (ret < 0) {
+        ERROR_LOG("io_context_add_signal failed");
         return -1;
     }
 

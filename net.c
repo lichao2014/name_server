@@ -33,10 +33,6 @@ io_context_close(struct io_context *ctx) {
         struct io_object *o = list_of(i, struct io_object, q);
         i = i->next;
 
-        if (!o->deleted) {
-            close(o->fd);
-        }
-
         free(o);
     }
 
@@ -44,7 +40,7 @@ io_context_close(struct io_context *ctx) {
 
     slice_free(&ctx->events);
 
-    if (ctx->epollfd >= 0) {
+    if (ctx->epollfd > 0) {
         close(ctx->epollfd);
         ctx->epollfd = -1;
     }
