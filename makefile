@@ -1,6 +1,6 @@
 CC := gcc
 AR := ar
-CFLAGS := -g3 -O0 -Wall -Werror -std=c99
+CFLAGS := -g3 -O0 -Wall -Werror
 
 TARGETS := server client slice_test list_test libcomm.a
 

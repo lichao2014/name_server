@@ -1,7 +1,11 @@
 #include "net.h"
 #include "log.h"
-#include <unistd.h>
-#include <stdio.h>
+#include <stdarg.h>
+#include <signal.h>
+#include <sys/signalfd.h>
+#include <sys/epoll.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 int
 io_context_init(struct io_context *ctx, size_t hint) {
@@ -25,9 +29,14 @@ io_context_init(struct io_context *ctx, size_t hint) {
 
 void
 io_context_close(struct io_context *ctx) {
-    for (struct list_t *i = ctx->objects.next; i; i = i->next) {
+    for (struct list_t *i = ctx->objects.next; i;) {
         struct io_object *o = list_of(i, struct io_object, q);
-        close(o->fd);
+        i = i->next;
+
+        if (!o->deleted) {
+            close(o->fd);
+        }
+
         free(o);
     }
 
@@ -37,6 +46,7 @@ io_context_close(struct io_context *ctx) {
 
     if (ctx->epollfd >= 0) {
         close(ctx->epollfd);
+        ctx->epollfd = -1;
     }
 }
 
@@ -123,6 +133,47 @@ io_context_add(struct io_context *ctx,
     ctx->nobjects++;
 
     return 0;
+}
+
+int
+io_context_add_signal(struct io_context *ctx,
+                               read_callback_t on_signal,
+                               void *arg,
+                               ...) {
+    sigset_t mask;
+    sigemptyset(&mask);
+
+    va_list ap;
+    va_start(ap, arg);
+    while (1) {
+        int sig = va_arg(ap, int);
+        if (sig < 0) {
+            break;
+        }
+
+        sigaddset(&mask, sig);
+    }
+    va_end(ap);
+
+    int sigfd = signalfd(-1, &mask, 0);
+    if (sigfd < 0) {
+        perror("signalfd");
+        return -1;
+    }
+
+    /* Block signals so that they aren't handled
+       according to their default dispositions */
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
+        close(sigfd);
+        return -1;
+    }
+
+    if (io_context_add(ctx, sigfd, on_signal, NULL, NULL, arg) < 0) {
+        close(sigfd);
+        return -1;
+    }
+
+    return sigfd;
 }
 
 int

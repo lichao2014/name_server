@@ -1,13 +1,6 @@
 #ifndef _NET_H_INCLUDED
 #define _NET_H_INCLUDED
 
-#include <sys/types.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <sys/epoll.h>
-
 #include "list.h"
 #include "slice.h"
 
@@ -45,6 +38,11 @@ int io_context_add(struct io_context *ctx,
                         write_callback_t on_write,
                         error_callback_t on_error,
                         void *arg);
+// add signal notify. return signalfd
+int io_context_add_signal(struct io_context *ctx,
+                                   read_callback_t on_signal,
+                                   void *arg,
+                                   ...);
 int io_context_del(struct io_context *ctx, int fd);
 
 struct sockaddr_in make_address4(const char *ip, int port);

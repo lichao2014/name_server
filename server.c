@@ -1,7 +1,9 @@
 #include <string.h>
-#include <stdio.h>
-#include <unistd.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <sys/signalfd.h>
+#include <signal.h>
+#include <getopt.h>
 
 #include "comm.h"
 #include "net.h"
@@ -47,6 +49,7 @@ struct name_server_t {
     struct list_t workers;
     size_t nworkers : (sizeof(size_t) * 8 - 1);
     int stopped : 1;
+    int sigfd;
 };
 
 static void
@@ -161,7 +164,7 @@ worker_add_client(struct name_worker_t *worker, int fd, int id) {
     client->fd = fd;
     client->worker = worker;
     list_init(&client->q);
-    
+
     if (id >= 0) {
         slice_init(&client->buf, 1, 4, 8);
         memcpy(client->buf.data, &id, sizeof id);
@@ -204,6 +207,7 @@ worker_on_read(struct io_object *o) {
     DEBUG_LOG("worker %d recv fd:%d msg id:%d\n",  worker->id, fd, id);
 
     if (worker->id != id) {
+        close(fd);
         return ;
     }
 
@@ -309,21 +313,29 @@ server_init(struct name_server_t *server, const char *ip, int port) {
     list_init(&server->workers);
     server->nworkers = 0;
     server->stopped = 0;
+    server->sigfd = -1;
 
     return 0;
 }
 
 static void
 server_close(struct name_server_t *server) {
-    for (struct list_t *i = server->workers.next; i; i = i->next) {
+    for (struct list_t *i = server->workers.next; i;) {
         struct name_worker_ctx_t *wc = list_of(i, struct name_worker_ctx_t, q);
+        i = i->next;
+
         close(wc->fd);
         free(wc);
     }
 
     server->nworkers = 0;
 
-    if (server->listenfd) {
+    if (server->sigfd > 0) {
+        close(server->sigfd);
+        io_context_del(&server->io_ctx, server->sigfd);
+    }
+
+    if (server->listenfd > 0) {
         close(server->listenfd);
     }
 
@@ -381,7 +393,7 @@ server_on_read(struct io_object *o) {
 static void
 server_on_error(struct io_object *o) {
     struct name_worker_ctx_t *wc = o->arg;
-    
+
     ERROR_LOG("server'` worker %d on error:%d\n", wc->id, errno);
 }
 
@@ -433,6 +445,28 @@ server_add_worker(struct name_server_t *server, int id) {
     return 0;
 }
 
+
+static void
+server_on_signal(struct io_object *o) {
+    struct name_server_t *server = o->arg;
+
+    struct signalfd_siginfo fdsi;
+    int ret = read(server->sigfd, &fdsi, sizeof fdsi);
+    if (ret <= 0) {
+        return ;
+    }
+
+    INFO_LOG("server on signal %d\n", fdsi.ssi_signo);
+
+    switch (fdsi.ssi_signo) {
+    case SIGINT:
+        server->stopped = 1;
+        break;
+    default:
+        break;
+    }
+}
+
 static int
 server_run(struct name_server_t *server, int nworkers) {
     int ret;
@@ -443,6 +477,18 @@ server_run(struct name_server_t *server, int nworkers) {
             return ret;
         }
     }
+
+    // handle sigal
+    ret = io_context_add_signal(&server->io_ctx,
+                                &server_on_signal,
+                                server,
+                                SIGINT,
+                                -1);
+    if (ret < 0) {
+        return -1;
+    }
+
+    server->sigfd = ret;
 
     // only master process run
     while (!server->stopped) {
@@ -464,15 +510,54 @@ do_server(const char *ip, int port, int nworkers) {
     server_run(&server, nworkers);
     server_close(&server);
 
+    INFO_LOG("server quit\n");
+
     return 0;
+}
+
+static void
+print_help_info(void) {
+    printf("server opt:\n"
+        "-h\tprint help info\n"
+        "-a\tlocal address ip(default:127.0.0.1)\n"
+        "-p\tlocal address port\n"
+        "-n\tnumber of workers\n");
 }
 
 int
 main(int argc, char *argv[]) {
-    if (argc < 4) {
-        printf("invalid args");
+    const char *ip = "127.0.0.1";
+    int port = -1;
+    int nworkers = -1;
+
+    int ch;
+    while (-1 != (ch = getopt(argc, argv, "ha:p:n:"))) {
+        switch (ch) {
+        case 'h':
+            print_help_info();
+            return 0;
+            break;
+        case 'a':
+            ip = optarg;
+            break;
+        case 'p':
+            port = atoi(optarg);
+            break;
+        case 'n':
+            nworkers = atoi(optarg);
+            break;
+        case '?':
+            printf("invalid arg '%c'\n", (char)(optopt));
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (!ip || (port <= 0) || (nworkers < 0)) {
+        print_help_info();
         return -1;
     }
 
-    return do_server(argv[1], atoi(argv[2]), atoi(argv[3]));
+    return do_server(ip, port, nworkers);
 }
